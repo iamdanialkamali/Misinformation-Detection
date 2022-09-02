@@ -1,0 +1,8 @@
+numpy
+pandas
+nltk
+torch
+transformers
+sklearn
+gensim
+IPython
