@@ -1,3 +1,15 @@
+import numpy
+import random
+import torch
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    numpy.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+g = torch.Generator()
+g.manual_seed(0)
+
 from article_data import ArticleDataset
 
 # Used for linear algebra calculations
@@ -5,7 +17,7 @@ import numpy as np
 
 # Roberta base model is used
 # for all classification models
-from transformers import RobertaModel
+from transformers import RobertaModel, LongformerModel
 
 # Used to define the dataset and classifier
 # objects
@@ -34,29 +46,47 @@ logging.set_verbosity_error()
 
 # Sklearn metrics are used to measure model performance
 from sklearn.metrics import f1_score, classification_report
-
+from copy import deepcopy
+from utils import get_collate_fn
 
 class RobertaClassifier(nn.Module):
 
-  def __init__(self, output_length, dropout=0.5):
+  def __init__(self, config):
     super(RobertaClassifier, self).__init__()
 
-    self.roberta = RobertaModel.from_pretrained("roberta-base")
-    self.dropout = nn.Dropout(dropout)
-    self.linear = nn.Linear(768, 1024)
-    self.linear2 = nn.Linear(1024, output_length)
+    # self.roberta = RobertaModel.from_pretrained("roberta-base")
+    self.roberta = LongformerModel.from_pretrained("allenai/longformer-base-4096")
+    if config.freeze_layers:
+      for idx, (name,params) in enumerate(self.roberta.named_parameters()):
+        if idx < config.freeze_layers:
+          params.requires_grad = False
+        # print(idx, name)
+        # if name.startswith("encoder.layer") and int(name.split(".")[2]) > 7
+    self.dropout = nn.Dropout(config.dropout)
+    if config.classifier_second_layer:
+      self.linear = nn.Linear(768, config.classifier_second_layer)
+      torch.nn.init.xavier_uniform(self.linear.weight)  
+      self.linear2 = nn.Linear(config.classifier_second_layer, config.num_labels)
+      torch.nn.init.xavier_uniform(self.linear2.weight)
+    else:
+      self.linear = nn.Linear(768, config.num_labels)
+      torch.nn.init.xavier_uniform(self.linear.weight)  
+      self.linear2 = None
+
     self.relu = nn.ReLU()
 
   def forward(self, input_id, mask):
     output_1 = self.roberta(input_ids=input_id, attention_mask=mask)
-    hidden_state = output_1[0]
-    pooler = hidden_state[:, 0]
+    pooler = output_1.last_hidden_state[:, 0]
     dropout_output = self.dropout(pooler)
     linear_output = self.linear(dropout_output)
-    relu_layer = self.relu(linear_output)
-    dropout_output2 = self.dropout(relu_layer)
-    linear_output2 = self.linear2(dropout_output2)
-    return linear_output2
+    if self.linear2:
+      relu_layer = self.relu(linear_output)
+      dropout_output2 = self.dropout(relu_layer)
+      linear_output2 = self.linear2(dropout_output2)
+      return linear_output2
+    else:
+      return linear_output
 
 
 # Find the values used in weighted loss. The formula used is:
@@ -71,16 +101,27 @@ def calculate_article_weights(data):
 
   return class_weights
 
-
+import sklearn
+import os
 # Training loop for the article modelling
 def article_train(model, train_data, learning_rate,
-                  epochs, batch_size, weights, column):
-
+                  epochs, batch_size, weights, column,
+                  path,test_data):
   # Define the article dataset for training
+  if os.path.exists(path):
+    checkpoint = torch.load(path)
+    best_model_weights = checkpoint["best_model_weights"]
+    max_val_acc = checkpoint["max_val_acc"]
+  else:
+    best_model_weights = model.state_dict()
+    max_val_acc = -10e10
+
+  train_data, dev_data = sklearn.model_selection.train_test_split(train_data,test_size=0.1,random_state=321)
+
   train = ArticleDataset(train_data, column)
 
   # Define the train dataloader
-  train_dataloader = torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True)
+  train_dataloader = torch.utils.data.DataLoader(train, batch_size=batch_size,collate_fn=get_collate_fn(), shuffle=True,worker_init_fn=seed_worker,generator=g)
 
   # Use GPU if available
   use_cuda = torch.cuda.is_available()
@@ -88,7 +129,6 @@ def article_train(model, train_data, learning_rate,
 
   # Define the loss function as weighted cross entropy
   criterion = nn.CrossEntropyLoss(weight=weights.float())
-
   # Define the optimizer as Adam
   optimizer = Adam(model.parameters(), lr=learning_rate)
 
@@ -96,7 +136,7 @@ def article_train(model, train_data, learning_rate,
   scheduler = get_linear_schedule_with_warmup(
     optimizer,
     num_warmup_steps=len(train_dataloader),
-    num_training_steps=len(train_dataloader) * epochs
+    num_training_steps=len(train_dataloader) * 100
   )
 
   if use_cuda:
@@ -104,7 +144,7 @@ def article_train(model, train_data, learning_rate,
     criterion = criterion.cuda()
 
   for epoch_num in range(epochs):
-
+    model.train()
     train_output = []
     train_targets = []
     train_loss = 0
@@ -125,7 +165,18 @@ def article_train(model, train_data, learning_rate,
       batch_loss.backward()
       optimizer.step()
       scheduler.step()
-
+    val_acc = article_evaluate(model, dev_data, batch_size, column)
+    print("TEST", end=" ")
+    article_evaluate(model, test_data, batch_size, column)
+    if max_val_acc < val_acc:
+      max_val_acc = val_acc
+      best_model_weights = deepcopy(model.state_dict())
+      print("SAVED")
+      torch.save({
+        "max_val_acc": max_val_acc,
+        "best_model_weights": deepcopy(model.state_dict())
+        },
+        path)
     print("epoch:{:2d} training: "
           "micro f1: {:.3f} "
           "macro f1: {:.3f} "
@@ -140,18 +191,20 @@ def article_train(model, train_data, learning_rate,
                                           zero_division="warn"),
                                  train_loss / len(train_data)))
 
-
-def article_evaluate(model, test_data, batch_size, column):
-
+  return best_model_weights
+def article_evaluate(model, test_data, batch_size, column,verbose=False):
+  model.eval()
   test = ArticleDataset(test_data, column)
-  test_dataloader = torch.utils.data.DataLoader(test, batch_size=batch_size)
+  test_dataloader = torch.utils.data.DataLoader(test, batch_size=batch_size,collate_fn=get_collate_fn(),worker_init_fn=seed_worker,generator=g)
 
   use_cuda = torch.cuda.is_available()
   device = torch.device("cuda" if use_cuda else "cpu")
-
+  criterion = nn.CrossEntropyLoss()
+  loss = 0
   if use_cuda:
     model = model.cuda()
-
+    criterion = criterion.cuda()
+  
   with torch.no_grad():
     test_output = []
     test_targets = []
@@ -160,10 +213,28 @@ def article_evaluate(model, test_data, batch_size, column):
       test_label = test_label.to(device)
       mask = test_input['attention_mask'].to(device)
       input_id = test_input['input_ids'].squeeze(1).to(device)
-
       model_batch_result = model(input_id, mask)
+      loss += criterion(model_batch_result, test_label.long())
+
+
       test_output.extend(np.argmax(model_batch_result.cpu().numpy(), axis=1))
       test_targets.extend(test_label.cpu().numpy())
 
   labels = ["True", "False"]
-  print(classification_report(test_targets, test_output, target_names=labels, digits=3))
+  macro_f1 = f1_score(y_true=test_targets,
+                                      y_pred=test_output,
+                                      average='macro',
+                                      zero_division="warn")
+  micro_f1 = f1_score(y_true=test_targets,
+                                      y_pred=test_output,
+                                      average='micro',
+                                      zero_division="warn")
+
+  if verbose:
+    print(classification_report(test_targets, test_output, target_names=labels, digits=3))
+  print("Validate micro f1: {:.3f} "
+      "macro f1: {:.3f} "
+      "loss: {:.3f}"
+      .format(micro_f1,macro_f1,loss))
+  return macro_f1
+

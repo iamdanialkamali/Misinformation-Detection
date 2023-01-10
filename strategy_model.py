@@ -1,3 +1,14 @@
+import numpy
+import random
+import torch
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    numpy.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+g = torch.Generator()
+g.manual_seed(0)
+
 # Roberta tokenizer is used for classification models
 from transformers import RobertaTokenizer
 
@@ -30,10 +41,12 @@ logging.set_verbosity_error()
 
 # Sklearn metrics are used to measure model performance
 from sklearn.metrics import f1_score, classification_report
+import sklearn
 
 from segment_data import SegmentDataset
+from utils import get_collate_fn
 
-
+import os
 # Find the values used in weighted loss. The formula used is:
 # ((1 - # of instances per class) / Total Instances)
 def calculate_weights(data):
@@ -69,13 +82,20 @@ def calculate_metrics(pred, layer, threshold=0.5):
 
 
 def strategy_train(model, train_data, learning_rate, epochs,
-                  batch_size, context, layer, class_weights):
+                  batch_size, context, layer, class_weights,config,test_data,path):
+  max_val_acc = -10e10
+  best_model_weights = model.state_dict()
 
   # Define the segment dataset for training
-  train = SegmentDataset(train_data, context)
+  train_data, dev_data = sklearn.model_selection.train_test_split(train_data,test_size=0.1,)
+  print("train_data_length", len(train_data))
+  print("dev_data_length", len(dev_data))
+
+  train = SegmentDataset(train_data, config)
 
   # Define the train dataloader
-  train_dataloader = torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True)
+  train_dataloader = torch.utils.data.DataLoader(train, batch_size=batch_size,collate_fn=get_collate_fn(), shuffle=True,
+                                                    worker_init_fn=seed_worker,generator=g)
 
   # Use GPU if available
   use_cuda = torch.cuda.is_available()
@@ -98,6 +118,11 @@ def strategy_train(model, train_data, learning_rate, epochs,
     num_warmup_steps=len(train_dataloader),
     num_training_steps=len(train_dataloader) * epochs
   )
+  if os.path.exists(path):
+    loaded = torch.load(path)
+    weights = loaded["weights"]
+    max_val_acc = loaded["max_val_acc"]
+    model.load_state_dict(weights)
 
   if use_cuda:
     model = model.cuda()
@@ -108,7 +133,9 @@ def strategy_train(model, train_data, learning_rate, epochs,
     train_output = []
     train_targets = []
     train_loss = 0
+    model.train()
 
+    # for train_input, train_label in tqdm(train_dataloader):
     for train_input, train_label in tqdm(train_dataloader):
       train_label = train_label.to(device)
       mask = train_input['attention_mask'].to(device)
@@ -129,12 +156,13 @@ def strategy_train(model, train_data, learning_rate, epochs,
       batch_loss.backward()
       optimizer.step()
       scheduler.step()
+    
 
     train_pred = calculate_metrics(np.array(train_output), layer)
     print("epoch:{:2d} training: "
           "micro f1: {:.3f} "
           "macro f1: {:.3f} "
-          "loss: {:.3f} ".format(epoch_num + 1,
+          "loss: {:.5f} ".format(epoch_num + 1,
                                  f1_score(y_true=train_targets,
                                           y_pred=train_pred,
                                           average='micro',
@@ -144,28 +172,54 @@ def strategy_train(model, train_data, learning_rate, epochs,
                                           average='macro',
                                           zero_division="warn"),
                                  train_loss / len(train_data)))
+    print("Validation",layer,context, end="  ")
+    val_acc = strategy_evaluate(model,dev_data,context,layer,config)
+    print("Test_VALID",layer,context, end="  ")
+    strategy_evaluate(model,test_data,context,layer,config)
+    if max_val_acc <= val_acc:
+      best_model_weights = model.state_dict()
+      max_val_acc = val_acc
+      print("SAVED")
+      torch.save({
+        "weights":best_model_weights,
+        "max_val_acc":max_val_acc
+      },path)
 
 
-def strategy_evaluate(model, test_data, context, layer):
-  test = SegmentDataset(test_data, context)
-  test_dataloader = torch.utils.data.DataLoader(test, batch_size=16)
+def strategy_evaluate(model, test_data, context, layer,config=None,verbose=False):
+  model.eval()
+  test = SegmentDataset(test_data, config)
+  test_dataloader = torch.utils.data.DataLoader(test,collate_fn=get_collate_fn(), batch_size=32,worker_init_fn=seed_worker,generator=g)
 
   use_cuda = torch.cuda.is_available()
   device = torch.device("cuda" if use_cuda else "cpu")
 
+  if layer == "1":
+    criterion = nn.CrossEntropyLoss()
+  elif layer in ["2", "3", "4"]:
+    criterion = nn.BCEWithLogitsLoss()
+  else:
+    raise Exception("Invalid Layer given (must be '1', '2', '3' or '4')")
+  
   if use_cuda:
     model = model.cuda()
-
+  
   with torch.no_grad():
     test_output = []
     test_targets = []
-
+    test_loss = 0
     for test_input, test_label in test_dataloader:
       test_label = test_label.to(device)
       mask = test_input['attention_mask'].to(device)
       input_id = test_input['input_ids'].squeeze(1).to(device)
 
       model_batch_result = model(input_id, mask)
+      if criterion:
+        if layer == "1":
+          batch_loss = criterion(model_batch_result.float(), test_label.long().squeeze(1))
+        else:
+          batch_loss = criterion(model_batch_result.float(), test_label)
+        test_loss += batch_loss
       test_output.extend(model_batch_result.cpu().numpy())
       test_targets.extend(test_label.long().squeeze(1).cpu().numpy())
 
@@ -250,24 +304,36 @@ def strategy_evaluate(model, test_data, context, layer):
       winner = np.argwhere(i == np.amax(i))
       for j in winner.flatten().tolist():
         label_set.add(j)
+    
     for i in sorted(label_set):
       labels.append(key_to_label[i])
-
-  print(classification_report(test_targets, pred, target_names=labels, digits=3))
+  if verbose:
+    print(classification_report(test_targets, pred, target_names=labels, digits=4))
+  mean_loss = test_loss / len(test)
+  micro_f1 = f1_score(y_true=test_targets,
+                                          y_pred=pred,
+                                          average='micro',
+                                          zero_division="warn")
+  macro_f1 = f1_score(y_true=test_targets,
+                                          y_pred=pred,
+                                          average='macro',
+                                          zero_division="warn")
+                                          
+  print("Validation : "
+          "micro f1: {:.4f} "
+          "macro f1: {:.4f} "
+          "loss: {:.4f} ".format(micro_f1, macro_f1, mean_loss))
+  return macro_f1
+  
 
 
 def strat_pred(model, sequence, context):
   device = torch.device("cuda")
   model = model.to(device)
+  model.eval()
   tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
-  context_to_len = {"none": 128, "low": 192, "high": 256}
-  try:
-    seq_length = context_to_len[context]
-  except:
-    raise "Invalid Context given (must be 'none', 'low', or 'high')"
-
   tokens = tokenizer(sequence, padding='max_length',
-                     max_length=seq_length,
+                     max_length=512,
                      truncation=True, return_tensors="pt")
   input = tokens["input_ids"].squeeze(1).to(device)
   mask = tokens["attention_mask"].to(device)

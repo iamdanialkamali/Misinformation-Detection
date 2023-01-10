@@ -114,9 +114,21 @@ def construct_segment_dict(directory, context):
     # Extract the annotations
     if "Persuasive_Labels" in file['_views']['_InitialView']:
       persuasive_labels = file['_views']['_InitialView']["Persuasive_Labels"]
+      sentences_ids = file['_views']['_InitialView']["Sentence"]
     else:
       persuasive_labels = []
-
+    begin_to_end = {}
+    end_to_begin = {}
+    for index, sentence_item in enumerate(sentences_ids):
+      if index == 0:
+        begin = 0
+        end = sentence_item.get("end")
+      else:
+        begin = sentence_item.get("begin")
+        end = sentence_item.get("end")
+      begin_to_end[begin] = end
+      end_to_begin[end] = begin
+        
     # Using the nltk "punkt" corpus, tokenize the article into sentences
     sentences = tokenize.sent_tokenize(article)
 
@@ -149,6 +161,25 @@ def construct_segment_dict(directory, context):
       except:
         right2 = ""
 
+      # If the left context is out of range, leave it blank
+      try:
+        left1 = sentences[idx - 2] if (idx - 2) >= 0 else ""
+      except:
+        left1 = ""
+      try:
+        left2 = sentences[idx - 1] if (idx - 1) >= 0 else ""
+      except:
+        left2 = ""
+      # If the right context is out of range, leave it blank
+      try:
+        right1 = sentences[idx + 1]
+      except:
+        right1 = ""
+      try:
+        right2 = sentences[idx + 2]
+      except:
+        right2 = ""
+
       if context == "none":
         segment = sentence
       elif context == "low":
@@ -156,7 +187,7 @@ def construct_segment_dict(directory, context):
       elif context == "high":
         segment = sentence + " </s> " + left1 + left2 + " </s> " + right1 + right2
       else:
-        raise "Invalid Context given (must be 'none', 'low', or 'high')"
+        raise Exception("Invalid Context given (must be 'none', 'low', or 'high')")
 
       # Add the segment to the list, as well as the global dictionary
       segments.append(segment)
@@ -173,10 +204,17 @@ def construct_segment_dict(directory, context):
       # An example label is:
       # {'sofa': 12, 'begin': 3779, 'end': 3851, 'EmotionalAppeals': 'anger'}
       for label in persuasive_labels:
-
         # Define the significant values
-        start_idx = int(label['begin'])
-        end_idx = int(label['end'])
+        if label.get('begin'):
+          start_idx = label.get('begin')
+        else:
+          start_idx = 0
+        
+        if label.get('end'):
+          end_idx = label.get('end')
+        else:
+          end_idx = begin_to_end[start_idx]
+        
         try:
           annotation = list(label.items())[3][1]
 
@@ -332,22 +370,22 @@ def convert_to_dataframe(segment_dict, layer):
 # Segment dataset used in training and testing
 class SegmentDataset(torch.utils.data.Dataset):
 
-  def __init__(self, data, context):
+  def __init__(self, data, config):
 
-    self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
-    context_to_len = {"none": 128, "low": 192, "high": 256}
-    try:
-      seq_length = context_to_len[context]
-    except:
-      raise "Invalid Context given (must be 'none', 'low', or 'high')"
-
+    # self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+    # context_to_len = {"none": 128, "low": 192, "high": 256}
+    # try:
+    #   seq_length = context_to_len[context]
+    # except:
+    #   raise "Invalid Context given (must be 'none', 'low', or 'high')"
     self.dataframe = data
-    self.texts = [self.tokenizer(text,
-                                 padding='max_length',
-                                 max_length=seq_length,
-                                 truncation=True,
-                                 return_tensors="pt")
-                  for text in data["Texts"]]
+    self.texts = tuple(data["Texts"])
+    #  [self.tokenizer(text,
+    #                              padding='max_length',
+    #                              max_length=config.max_length,
+    #                              truncation=True,
+    #                              return_tensors="pt")
+    #               for text in data["Texts"]]
 
   def __len__(self):
     return len(self.texts)

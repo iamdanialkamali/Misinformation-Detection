@@ -27,12 +27,36 @@ def add_to_dir(filename, index, outer_file, output_dir):
 # This function prepares files from a webAnno project to be used in our project.
 # The final result is two folders of json files for training and testing, split
 # along the given "split" argument
-def prepare_files(filename, split):
-  split_idx = int(split*len(os.listdir(filename)))
+def clean_folder(address):
+  import os
+  address = os.path.join(os.getcwd(),address) 
+  files = os.listdir(address)
+  for f in files:
+    file_address = os.path.join(address,f) 
+    os.remove(file_address)
 
+# def prepare_files(filename, split):
+#   split_idx = int(split*len(os.listdir(filename)))
+#   base_file_address = "/".join(filename.split("/")[:-1])
+#   # For all files in the train split:
+#   clean_folder(base_file_address+"/anno_train/")
+#   for idx, outer_file in enumerate(os.listdir(filename)[:split_idx]):
+#     add_to_dir(filename, idx, outer_file, "anno_train")
+#   clean_folder(base_file_address+"/anno_test/")
+#   # For all files in the annotation folder:
+#   for idx, outer_file in enumerate(os.listdir(filename)[split_idx:]):
+#     add_to_dir(filename, idx, outer_file, "anno_test")
+
+import sklearn
+def prepare_files(filename, split):
+  train_data, test_data = sklearn.model_selection.train_test_split(os.listdir(filename),test_size=1-split,random_state=321)
+  base_file_address = "/".join(filename.split("/")[:-1])
   # For all files in the train split:
-  for idx, outer_file in enumerate(os.listdir(filename)[:split_idx]):
+  # For all files in the train split:
+  clean_folder(base_file_address+"/anno_train/")
+  for idx, outer_file in enumerate(train_data):
     add_to_dir(filename, idx, outer_file, "anno_train")
   # For all files in the annotation folder:
-  for idx, outer_file in enumerate(os.listdir(filename)[split_idx:]):
+  clean_folder(base_file_address+"/anno_test/")
+  for idx, outer_file in enumerate(test_data):
     add_to_dir(filename, idx, outer_file, "anno_test")

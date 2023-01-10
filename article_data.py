@@ -17,7 +17,6 @@ import pandas as pd
 from transformers import RobertaTokenizer
 
 # Importing package and summarizer
-import gensim
 from gensim.summarization import summarize
 
 # Used for suppressing warnings
@@ -31,14 +30,14 @@ nltk.download('punkt')
 # Used to define the dataset and classifier
 # objects
 import torch
-
+from tqdm import tqdm
 from strategy_model import strat_pred
 
 
 # Construct a dataframe of articles, along with a list of persuasive strategies
 # that they were annotated with.
 def construct_article_df(directory):
-  articles, strategies = [], []
+  ids, claims, articles, strategies = [], [], [], []
 
   # Loop through the annotation folder
   for filename in os.listdir(directory):
@@ -49,8 +48,19 @@ def construct_article_df(directory):
       file = json.load(read_file)
 
     # Extract the article text
-    article = file['_referenced_fss']['12']['sofaString']
-    articles.append(article)
+    article_and_content = file['_referenced_fss']['12']['sofaString']
+    splited = re.split(r"(?P<url>https?://[^\s]+)",article_and_content)
+    if len(splited) == 3:
+      splited1 = re.split(r"(?P<url>www\.[^\s]+)",article_and_content)
+      claim_and_link, article = splited1[0],splited1[2].strip()
+    else:
+      claim_and_link, article = splited[0], " ".join(splited[4:])
+    article = " ".join(re.split("Actual content:",article)).strip()
+    claim_with_id, *_ = re.split("Source", claim_and_link, flags=re.IGNORECASE)
+    id, claim = claim_with_id.split(" ")[0]," ".join(claim_with_id.split(" ")[1:])
+    ids.append(id.strip())
+    articles.append(article.strip())
+    claims.append(claim.strip())
 
     # Extract the annotations
     strategy_location = file['_views']['_InitialView']
@@ -69,7 +79,7 @@ def construct_article_df(directory):
 
     strategies.append(singular_strats)
 
-  data = pd.DataFrame(list(zip(articles, strategies)), columns=["article", "target_strategy"])
+  data = pd.DataFrame(list(zip(ids ,claims, articles, strategies)), columns=["id", "claim", "article", "target_strategy"])
   return data
 
 
@@ -117,14 +127,14 @@ def prepare_multiFC(file):
 
 
 # Add labels to our dataframe by cross referencing the multiFC dataset
-def add_labels(articles, data, norm):
+def add_labels(ids, data, norm):
   labels = []
 
-  for i in articles:
-    i = i.replace("\ufeff", "")
+  for id in ids:
+    id = id.replace("\ufeff", "")
 
     # Match the claim ID to a row in MultiFC and extract the label
-    row = data.loc[data["claimID"] == i[:10]]
+    row = data.loc[data["claimID"] == id]
     try:
       labels.append(row["label"].tolist()[0])
     except:
@@ -164,14 +174,14 @@ def cut_pre_text(articles):
 
 # Summarize the article text so that it can be combined with the persuasive
 # strategies and inputted into Roberta
-def correct_length_inputs(articles, strategies):
+def correct_length_inputs(claims,articles, strategies):
   combined = []
 
   # For all articles and the strategies they are annotated with
-  for article, strategy in zip(articles, strategies):
+  for claim, article, strategy in tqdm(zip(claims, articles, strategies)):
 
     # The maximum token length the article can be is 512 - (strategy token length)
-    strat_token_len = token_length(strategy)
+    strat_token_len = token_length(strategy) + token_length(claim)
     max_article_len = 512 - strat_token_len
 
     combined_str = ""
@@ -180,19 +190,17 @@ def correct_length_inputs(articles, strategies):
         summary = summarize(article, ratio=i / 10)
         token_len = token_length(summary)
         if token_len < max_article_len:
-          combined_str = summary + ' </s> ' + strategy
+          combined_str = claim + ' </s> ' + summary + ' </s> ' + strategy
           break
       except:
-        combined_str = article + ' </s> ' + strategy
+        combined_str = claim + ' </s> ' + article + ' </s> ' + strategy
         break
     try:
       combined_str
     except:
       summary = summarize(article, ratio=0.1)
-      combined_str = summary + ' </s> ' + strategy
+      combined_str = claim + ' </s> ' + summary + ' </s> ' + strategy
     combined.append(combined_str)
-    clear_output(wait=True)
-
   return combined
 
 
@@ -305,9 +313,8 @@ l4 = {
 # Predict the persuasive strategies in a list of articles
 def predict_strategies(articles, models, context):
   pred = []
-  i=0
   # Loop through the list of articles
-  for article in articles:
+  for article in tqdm(articles):
 
     article_strats = []
 
@@ -338,44 +345,71 @@ def predict_strategies(articles, models, context):
 
       # Add the sequence strategies to the article strategies
       article_strats += seq_strats
-    print(i)
-    i+=1
     pred.append(article_strats)
 
   return pred
 
 
+def combine_claim_article(claims_articles):
+  combined = []
+
+  # For all articles and the strategies they are annotated with
+  for claim, article in tqdm(claims_articles):
+
+    # The maximum token length the article can be is 512 - (strategy token length)
+    strat_token_len = token_length(claim)
+    max_article_len = 512 - strat_token_len
+
+    combined_str = ""
+    for i in range(10, 0, -1):
+      try:
+        summary = summarize(article, ratio=i / 10)
+        token_len = token_length(summary)
+        if token_len < max_article_len:
+          combined_str = claim + ' </s> ' + summary
+          break
+      except:
+        combined_str =  claim + ' </s> ' + article
+        break
+    try:
+      combined_str
+    except:
+      summary = summarize(article, ratio=0.1)
+      combined_str = claim + ' </s> ' + article
+    combined.append(combined_str)
+
+  return combined
+
+
 # Build a dataset from the annotated articles
-def build_complete_dataset(file, models, context):
+def build_complete_dataset(file, models, context,config):
   # Construct the basic dataframe with article texts and ground truth strategies
   data = construct_article_df(file)
+  # Prepare the multiFC files for labelling
+  file = "data/all.tsv"
+  multiFC_data = prepare_multiFC(file)
+  # Add the normalized labels
+  data["label"] = add_labels(data["id"], multiFC_data, norm=True)
+  data = data[data["label"] != "mixed"]
+  data = data[data["label"] != "none"]
 
   # Remove duplicates and convert the strategies into a token separated list
+  data["combined"] = combine_claim_article(zip(data["claim"],data["article"]))
+
   data["target_strategy"] = remove_duplicates(data["target_strategy"])
   data["target_strategy"] = list_to_str(data["target_strategy"], sep=' </s> ')
 
   # Predict the article strategies at the given context
   data["pred_strategy"] = predict_strategies(data["article"], models, context)
-  data["pred_strategy"] = remove_duplicates(data["HC_pred_strategy"])
-  data["pred_strategy"] = list_to_str(data["HC_pred_strategy"], sep=' </s> ')
+  data["pred_strategy"] = remove_duplicates(data["pred_strategy"])
+  data["pred_strategy"] = list_to_str(data["pred_strategy"], sep=' </s> ')
 
-  # Prepare the multiFC files for labelling
-  file = "data/all.tsv"
-  multiFC_data = prepare_multiFC(file)
-
-  # Add the normalized labels
-  data["label"] = add_labels(data["article"], multiFC_data, norm=True)
-  data = data[data["label"] != "mixed"]
-  data = data[data["label"] != "none"]
-
-  # Cut the text that is not part of the article content
-  data["article"] = cut_pre_text(data["article"])
 
   # Create the column with the article text and target strategies
-  data["target_combined"] = correct_length_inputs(data["article"], data["target_strategy"])
+  data["target_combined"] = correct_length_inputs(data["claim"], data["article"], data["target_strategy"])
 
   # Create the column with the article text and predicted strategies
-  data["pred_strategy"] = correct_length_inputs(data["article"], data["pred_strategy"])
+  data["pred_strategy"] = correct_length_inputs(data["claim"], data["article"], data["pred_strategy"])
 
   return data
 
@@ -387,6 +421,8 @@ class ArticleDataset(torch.utils.data.Dataset):
     self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
     labels = \
       {
+        True:0,
+        False:1,
         "true": 0,
         "false": 1
       }
