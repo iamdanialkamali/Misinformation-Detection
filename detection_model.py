@@ -54,8 +54,8 @@ class RobertaClassifier(nn.Module):
   def __init__(self, config):
     super(RobertaClassifier, self).__init__()
 
-    # self.roberta = RobertaModel.from_pretrained("roberta-base")
-    self.roberta = LongformerModel.from_pretrained("allenai/longformer-base-4096")
+    self.roberta = RobertaModel.from_pretrained("roberta-base")
+    # self.roberta = LongformerModel.from_pretrained("allenai/longformer-base-4096")
     if config.freeze_layers:
       for idx, (name,params) in enumerate(self.roberta.named_parameters()):
         if idx < config.freeze_layers:

@@ -15,8 +15,9 @@ def set_seed(SEED):
     torch.backends.cudnn.benchmark = False
 
 def get_collate_fn():
-    from transformers import LongformerTokenizer
-    tokenizer = LongformerTokenizer.from_pretrained("allenai/longformer-base-4096")
+    from transformers import LongformerTokenizer, RobertaTokenizer
+    # tokenizer = LongformerTokenizer.from_pretrained("allenai/longformer-base-4096")
+    tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 
     def collate_fn(batch):
         """
@@ -27,7 +28,7 @@ def get_collate_fn():
         texts,labels = torch.utils.data.default_collate(batch)
         texts = tokenizer(texts,
                             padding=True,
-                            # max_length=4096,
+                            max_length=512,
                             truncation=True,
                             return_tensors="pt")
         return texts, labels
