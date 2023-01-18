@@ -20,7 +20,8 @@ def add_to_dir(filename, index, outer_file, output_dir):
           archive.extract(k.filename, 'data/'+output_dir)
           os.rename('data/'+output_dir+'/admin.json',
                     'data/'+output_dir+'/admin' + str(index) + '.json')
-    except:
+    except Exception as e:
+      print(e)
       continue
 
 

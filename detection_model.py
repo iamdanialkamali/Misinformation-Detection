@@ -48,14 +48,17 @@ logging.set_verbosity_error()
 from sklearn.metrics import f1_score, classification_report
 from copy import deepcopy
 from utils import get_collate_fn
+from utils import get_tokenizer
 
 class RobertaClassifier(nn.Module):
 
   def __init__(self, config):
     super(RobertaClassifier, self).__init__()
+    if config.longformer:
+      self.roberta = LongformerModel.from_pretrained("allenai/longformer-base-4096")
+    else:
+      self.roberta = RobertaModel.from_pretrained("roberta-base")
 
-    self.roberta = RobertaModel.from_pretrained("roberta-base")
-    # self.roberta = LongformerModel.from_pretrained("allenai/longformer-base-4096")
     if config.freeze_layers:
       for idx, (name,params) in enumerate(self.roberta.named_parameters()):
         if idx < config.freeze_layers:
@@ -111,13 +114,13 @@ def article_train(model, train_data, learning_rate,
   if os.path.exists(path):
     checkpoint = torch.load(path)
     best_model_weights = checkpoint["best_model_weights"]
-    max_val_acc = checkpoint["max_val_acc"]
+    min_loss = checkpoint["min_loss"]
   else:
     best_model_weights = model.state_dict()
-    max_val_acc = -10e10
+    min_loss = 10e10
 
-  train_data, dev_data = sklearn.model_selection.train_test_split(train_data,test_size=0.1,random_state=321)
-
+  train_data, dev_data = sklearn.model_selection.train_test_split(train_data,test_size=0.1,random_state=2)
+  print(calculate_article_weights(dev_data))
   train = ArticleDataset(train_data, column)
 
   # Define the train dataloader
@@ -165,18 +168,6 @@ def article_train(model, train_data, learning_rate,
       batch_loss.backward()
       optimizer.step()
       scheduler.step()
-    val_acc = article_evaluate(model, dev_data, batch_size, column)
-    print("TEST", end=" ")
-    article_evaluate(model, test_data, batch_size, column)
-    if max_val_acc < val_acc:
-      max_val_acc = val_acc
-      best_model_weights = deepcopy(model.state_dict())
-      print("SAVED")
-      torch.save({
-        "max_val_acc": max_val_acc,
-        "best_model_weights": deepcopy(model.state_dict())
-        },
-        path)
     print("epoch:{:2d} training: "
           "micro f1: {:.3f} "
           "macro f1: {:.3f} "
@@ -190,9 +181,23 @@ def article_train(model, train_data, learning_rate,
                                           average='macro',
                                           zero_division="warn"),
                                  train_loss / len(train_data)))
+    vaL_loss, val_micro_f1, val_macro_f1 = article_evaluate(model, dev_data, batch_size, column)
+    print("TEST", end=" ")
+    article_evaluate(model, test_data, batch_size, column)                    
+    if vaL_loss < min_loss:
+      min_loss = vaL_loss
+      best_model_weights = deepcopy(model.state_dict())
+      print("SAVED")
+      torch.save({
+        "min_loss": min_loss,
+        "best_model_weights": deepcopy(model.state_dict())
+        },
+        path)
+
+
 
   return best_model_weights
-def article_evaluate(model, test_data, batch_size, column,verbose=False):
+def article_evaluate(model, test_data, batch_size, column,verbose=False,return_results=False):
   model.eval()
   test = ArticleDataset(test_data, column)
   test_dataloader = torch.utils.data.DataLoader(test, batch_size=batch_size,collate_fn=get_collate_fn(),worker_init_fn=seed_worker,generator=g)
@@ -236,5 +241,7 @@ def article_evaluate(model, test_data, batch_size, column,verbose=False):
       "macro f1: {:.3f} "
       "loss: {:.3f}"
       .format(micro_f1,macro_f1,loss))
-  return macro_f1
+  if return_results:
+    return test_output
+  return loss, micro_f1, macro_f1
 

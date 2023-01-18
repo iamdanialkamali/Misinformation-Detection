@@ -8,11 +8,14 @@ class _Config(object):
     dropout = 0.5
     freeze_layers = None    #133#149#165#181#197
     num_labels = None
+    longformer = False
     classifier_second_layer = None
 
 
-def get_config(layer,context):
+def get_config(layer,context,seed=None):
     config = _Config()
+    if seed is not None:
+        config.seed = seed
     if layer == "1":
         config.num_labels = 2        
         config.epochs = 40
@@ -29,8 +32,7 @@ def get_config(layer,context):
         config.num_labels = 9
         config.epochs = 60
         config.classifier_second_layer = 1024
-        if context == "high":
-            config.seed = 877
+
 
     return config
 

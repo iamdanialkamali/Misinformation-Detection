@@ -33,8 +33,8 @@ logging.set_verbosity_error()
 
 # Sklearn metrics are used to measure model performance
 from sklearn.metrics import f1_score, classification_report
-
-SEED = 4133
+import random
+SEED = random.randint(0,2**32 - 1)
 set_seed(SEED)
 
 
@@ -93,7 +93,7 @@ class MultiFC(Dataset):
 # Training loop for the multifc modelling
 def multifc_train(model, train_dataset, test_dataset, config, weights):
   # Define the multifc dataset for training
-  path = "models/multifc.pt"
+  path = f"models/multifc_{SEED}.pt"
   if os.path.exists(path):
     checkpoint = torch.load(path)
     best_model_weights = checkpoint["best_model_weights"]
@@ -165,7 +165,7 @@ def multifc_train(model, train_dataset, test_dataset, config, weights):
                                           zero_division="warn"),
                                  train_loss / len(train_dataloader)))
 
-    val_acc = multifc_evaluate(model, dev_dataset, config)
+    val_acc, _ = multifc_evaluate(model, dev_dataset, config)
     print("TEST",end="  ")
     multifc_evaluate(model, test_dataset, config)
     if max_val_acc < val_acc:
@@ -217,7 +217,7 @@ def multifc_evaluate(model, dev_dataset, config ,verbose=False):
       "macro f1: {:.3f} "
       "loss: {:.4f} "
       .format(micro_f1,macro_f1,test_loss/len(test_dataloader)))
-  return macro_f1
+  return macro_f1 ,micro_f1
 
 
 def generate_data(model, dev_dataset, config):
@@ -244,22 +244,23 @@ def generate_data(model, dev_dataset, config):
 class Config:
     dropout = 0.5
     num_labels = 9
-    freeze_layers = 181 #133#149#165#181#197 #181
+    freeze_layers = None #133#149#165#181#197 #181
     learning_rate = 5e-5
     batch_size = 10
     epochs = 12
+    longformer = False
     classifier_second_layer = None #128
+if __name__ == "__main__":
+  config = Config()
+  train_dataset = MultiFC(mode="train")
+  dev_dataset = MultiFC(mode="dev")
+  test_dataset = MultiFC(mode="test")
 
-config = Config()
-train_dataset = MultiFC(mode="train")
-dev_dataset = MultiFC(mode="dev")
-test_dataset = MultiFC(mode="test")
+  model = RobertaClassifier(config)
+  weights = train_dataset.get_weights()
 
-model = RobertaClassifier(config)
-weights = train_dataset.get_weights()
-
-multifc_train(model, train_dataset, dev_dataset, config, weights)
-best_model_weights = torch.load("models/multifc.pt")["best_model_weights"]
-model.load_state_dict(best_model_weights)
-multifc_evaluate(model, dev_dataset, config,verbose=True)
-# generate_data(model, test_dataset, config)
+  multifc_train(model, train_dataset, dev_dataset, config, weights)
+  best_model_weights = torch.load(f"models/multifc_{SEED}.pt")["best_model_weights"]
+  model.load_state_dict(best_model_weights)
+  multifc_evaluate(model, dev_dataset, config,verbose=True)
+  # generate_data(model, test_dataset, config)

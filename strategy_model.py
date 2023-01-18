@@ -173,7 +173,7 @@ def strategy_train(model, train_data, learning_rate, epochs,
                                           zero_division="warn"),
                                  train_loss / len(train_data)))
     print("Validation",layer,context, end="  ")
-    val_acc = strategy_evaluate(model,dev_data,context,layer,config)
+    val_acc, _ = strategy_evaluate(model, dev_data, context, layer, config)
     print("Test_VALID",layer,context, end="  ")
     strategy_evaluate(model,test_data,context,layer,config)
     if max_val_acc <= val_acc:
@@ -308,7 +308,7 @@ def strategy_evaluate(model, test_data, context, layer,config=None,verbose=False
     for i in sorted(label_set):
       labels.append(key_to_label[i])
   if verbose:
-    print(classification_report(test_targets, pred, target_names=labels, digits=4))
+    print(classification_report(test_targets, pred, target_names=labels, digits=3))
   mean_loss = test_loss / len(test)
   micro_f1 = f1_score(y_true=test_targets,
                                           y_pred=pred,
@@ -320,20 +320,21 @@ def strategy_evaluate(model, test_data, context, layer,config=None,verbose=False
                                           zero_division="warn")
                                           
   print("Validation : "
-          "micro f1: {:.4f} "
-          "macro f1: {:.4f} "
-          "loss: {:.4f} ".format(micro_f1, macro_f1, mean_loss))
-  return macro_f1
+          "micro f1: {:.3f} "
+          "macro f1: {:.3f} "
+          "loss: {:.3f} ".format(micro_f1, macro_f1, mean_loss))
+  return macro_f1, micro_f1
   
 
 
-def strat_pred(model, sequence, context):
+def strat_pred(model, sequence, context, config):
+  from utils import get_tokenizer
   device = torch.device("cuda")
   model = model.to(device)
   model.eval()
-  tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
-  tokens = tokenizer(sequence, padding='max_length',
-                     max_length=512,
+  tokenizer = get_tokenizer(config.longformer)
+  tokens = tokenizer(sequence, padding=True,
+                     max_length=config.max_length,
                      truncation=True, return_tensors="pt")
   input = tokens["input_ids"].squeeze(1).to(device)
   mask = tokens["attention_mask"].to(device)

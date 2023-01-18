@@ -1,4 +1,3 @@
-from anno_file_prep import prepare_files
 from segment_data import construct_segment_dict
 from segment_data import convert_to_dataframe
 from strategy_model import calculate_weights
@@ -8,31 +7,23 @@ from detection_model import RobertaClassifier
 from configs import get_config
 
 import torch
-import os
 import torch
 import argparse
 from utils import set_seed
-SPLIT = 0.8
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--split_data', type=int,default=0)
 parser.add_argument('--test_article', type=int,default=0)
 parser.add_argument('--mode', type=str,default="train")
 parser.add_argument('--layer', type=str,choices="1,2,3,4".split(","),default="1")
 parser.add_argument('--context', type=str,choices="none,low,high".split(","),default="none")
+parser.add_argument('--seed', type=int,default=None)
 args = parser.parse_args()
 layer = args.layer
 context = args.context
 print(layer, context)
 
 
-if args.split_data:
-    # Define the train/test split and prepare the annotation files
-    # This will create data/anno_train and data/anno_test
-    prepare_files('data/annotation', SPLIT)
-
-
-config = get_config(layer,context)
+config = get_config(layer,context,seed=args.seed)
 print(config.seed)
 set_seed(config.seed)
 path = f"models/{layer}_{context}_{config.seed}.pt"
@@ -57,21 +48,12 @@ model = RobertaClassifier(config)
 
 # Declare the learning rate and batch size for strategy training
 # Train and evaluate the 4 layer strategy models
-if args.mode == "test":
-    if os.path.exists(path):
-        loaded = torch.load(path)
-        weights = loaded["weights"]
-        max_val_acc = loaded["max_val_acc"]
-        model.load_state_dict(weights)
-    print("test_data_length", len(test))
-    strategy_evaluate(model=model, test_data=test, context=context, layer=layer,config=config,verbose=True)
-else:
-    strategy_train(model=model, train_data=train, learning_rate=config.learning_rate, epochs=config.epochs,
-                batch_size=config.batch_size, context=context, layer=layer, class_weights=weights,config=config,test_data=test,path=path)
-    loaded = torch.load(path)
-    weights = loaded["weights"]
-    max_val_acc = loaded["max_val_acc"]
-    model.load_state_dict(weights)
-    print("test_data_length", len(test))
-    print("Test",layer,context, end="  ")
-    strategy_evaluate(model=model, test_data=test, context=context, layer=layer,config=config,verbose=True)
+strategy_train(model=model, train_data=train, learning_rate=config.learning_rate, epochs=config.epochs,
+            batch_size=config.batch_size, context=context, layer=layer, class_weights=weights,config=config,test_data=test,path=path)
+loaded = torch.load(path)
+weights = loaded["weights"]
+max_val_acc = loaded["max_val_acc"]
+model.load_state_dict(weights)
+print("test_data_length", len(test))
+print("Test",layer,context, end="  ")
+strategy_evaluate(model=model, test_data=test, context=context, layer=layer,config=config,verbose=True)

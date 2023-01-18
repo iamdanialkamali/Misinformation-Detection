@@ -12,9 +12,6 @@ import numpy as np
 # Used for dataframes
 import pandas as pd
 
-# Roberta tokenizer and base model are used
-# for all classification models
-from transformers import RobertaTokenizer
 
 # Importing package and summarizer
 from gensim.summarization import summarize
@@ -32,6 +29,7 @@ nltk.download('punkt')
 import torch
 from tqdm import tqdm
 from strategy_model import strat_pred
+from utils import l2, l3, l4
 
 
 # Construct a dataframe of articles, along with a list of persuasive strategies
@@ -79,7 +77,7 @@ def construct_article_df(directory):
 
     strategies.append(singular_strats)
 
-  data = pd.DataFrame(list(zip(ids ,claims, articles, strategies)), columns=["id", "claim", "article", "target_strategy"])
+  data = pd.DataFrame(list(zip(ids ,claims, articles, strategies)), columns=["id", "claim", "article", "gt_strategy"])
   return data
 
 
@@ -95,23 +93,21 @@ def remove_duplicates(list1):
 def list_to_str(list1, sep=' '):
   list2 = []
   for inner_list in list1:
-    list2.append(sep.join(inner_list))
+    list2.append(sep.join(map(lambda x:x.lower(),inner_list)))
   return list2
 
 
 # Given a string, return its length in tokens
-def token_length(new_str):
-  tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
-  tokens = tokenizer(new_str, padding='max_length', max_length=1024,
+def token_length(new_str, config):
+  from utils import get_tokenizer
+  tokenizer = get_tokenizer(config.longformer)
+  tokens = tokenizer(new_str, padding=True, max_length=config.max_length*2,
                      truncation=True, return_tensors='pt')
 
   # Token arrays are numpy ones arrays, so add up all numbers
   # in the list that do not equal one
-  length = 0
-  for i in tokens['input_ids'][0]:
-    if i != 1:
-      length += 1
-  return length
+  lengths = (tokens['input_ids'] > 2).sum()
+  return int(lengths)
 
 
 # Prepare MultiFC files to be used
@@ -174,32 +170,55 @@ def cut_pre_text(articles):
 
 # Summarize the article text so that it can be combined with the persuasive
 # strategies and inputted into Roberta
-def correct_length_inputs(claims,articles, strategies):
+def correct_length_inputs(claims,articles, strategies, config):
   combined = []
 
   # For all articles and the strategies they are annotated with
   for claim, article, strategy in tqdm(zip(claims, articles, strategies)):
 
     # The maximum token length the article can be is 512 - (strategy token length)
-    strat_token_len = token_length(strategy) + token_length(claim)
-    max_article_len = 512 - strat_token_len
+    strat_token_len = token_length(strategy,config) + token_length(claim,config)
+    max_article_len = config.max_length - strat_token_len
 
     combined_str = ""
+    summary = article
     for i in range(10, 0, -1):
-      try:
-        summary = summarize(article, ratio=i / 10)
-        token_len = token_length(summary)
-        if token_len < max_article_len:
-          combined_str = claim + ' </s> ' + summary + ' </s> ' + strategy
-          break
-      except:
-        combined_str = claim + ' </s> ' + article + ' </s> ' + strategy
+      token_len = token_length(summary, config)
+      if token_len < max_article_len:
         break
-    try:
-      combined_str
-    except:
-      summary = summarize(article, ratio=0.1)
-      combined_str = claim + ' </s> ' + summary + ' </s> ' + strategy
+      # summary = summarize(summary, ,ratio=i / 10)
+      try:
+        summary = summarize(summary, word_count=max_article_len)
+      except ValueError:
+        summary = " ".join(summary.split(" ")[:max_article_len])
+    combined_str = claim + ' </s></s> ' + summary + ' </s></s> ' + strategy
+    combined.append(combined_str)
+  return combined
+
+
+# Summarize the article text so that it can be combined with the persuasive
+# strategies and inputted into Roberta
+def correct_length_inputs_claim(claims, strategies, config):
+  combined = []
+
+  # For all articles and the strategies they are annotated with
+  for claim, strategy in tqdm(zip(claims, strategies)):
+
+    # The maximum token length the article can be is 512 - (strategy token length)
+    strat_token_len = token_length(strategy,config) + token_length(claim,config)
+    max_article_len = config.max_length - strat_token_len
+
+    combined_str = ""
+    summary = claim
+    for i in range(10, 0, -1):
+      token_len = token_length(summary, config)
+      if token_len < max_article_len:
+        break
+      try:
+        summary = summarize(summary, word_count=max_article_len)
+      except ValueError:
+        summary = " ".join(summary.split(" ")[:max_article_len])
+    combined_str = summary + ' </s></s> ' + strategy
     combined.append(combined_str)
   return combined
 
@@ -249,69 +268,8 @@ def split_article(article, context):
   return segments
 
 
-l2 = {
-  0: "Narrative with Details",
-  1: "Using Anecdotes and Personal Experience as Evidence",
-  2: "distrusting government or pharmaceutical companies",
-  3: "politicizing health issues",
-  4: "Highlighting Uncertainty and Risk",
-  5: "Exploiting Science’s Limitations",
-  6: "inappropriate use of scientific evidence",
-  7: "rhetorical tricks",
-  8: "biased reasoning to make a conclusion",
-  9: "emotional appeals",
-  10: "distinctive linguistic features",
-  11: "Establishing Legitimacy",
-}
-
-l3 = {
-  0: "Narrative with details_verified to be false",
-  1: "Narrative with details_details verified to be true",
-  2: "Narrative with details_details not verified",
-  3: "financial motivation",
-  4: "freedom of choice and agency",
-  5: "ingroup vs. outgroup",
-  6: "political figures or political argument",
-  7: "religion or ideology",
-  8: "Inappropriate Use of Scientific and Other Evidence - out of context_verified",
-  9: "less robust evidence or outdated evidence_verified",
-  10: "lack of citation for evidence",
-  11: "exaggeration",
-  12: "inappropriate analogy or false connection",
-  13: "wrong cause-effect",
-  14: "lack of evidence or use unverified and incomplete evidence to make a claim",
-  15: "claims without evidence",
-  16: "evidence does not support conclusion",
-  17: "shifting hypothesis",
-  18: "fear",
-  19: "anger",
-  20: "hope",
-  21: "anxiety",
-  22: "uppercase words",
-  23: "linguistic intensifier (e.g., extreme words)",
-  24: "title of article as clickbait",
-  25: "bolded words or underline",
-  26: "ellipses, exaggerated/excessive usage of punctuation marks",
-  27: "citing seemingly credible source",
-  28: "surface credibility markers",
-  29: "Call to action"
-}
-
-l4 = {
-  0: "citing source to establish legitimacy_source verified to be credible",
-  1: "citing source to establish legitimacy_source verified to not be credible in this context",
-  2: "citing source to establish legitimacy_source not verified",
-  3: "citing source to establish legitimacy_source verified to be made up",
-  4: "legitimate persuasive techniques: rhetorical question",
-  5: "legitimate persuasive techniques: humor",
-  6: "surface credibility markers - medical or scientific jargon",
-  7: "surface credibility markers - words associated with nature or healthiness",
-  8: "surface credibility markers - simply claiming authority or credibility"
-}
-
-
 # Predict the persuasive strategies in a list of articles
-def predict_strategies(articles, models, context):
+def predict_strategies(articles, models, context, config):
   pred = []
   # Loop through the list of articles
   for article in tqdm(articles):
@@ -325,20 +283,20 @@ def predict_strategies(articles, models, context):
     for seq in text_sequences:
       # Predict the persuasive strategies at the three layers
       # of classification
-      l2_output = strat_pred(models[1], seq, context)
+      l2_output = strat_pred(models[1], seq, context, config)
       l2_output = np.array(l2_output > 0.5, dtype=float)
       l2_idx = np.where(l2_output == 1)[0]
-      l2_output = [l2[idx] for idx in l2_idx]
+      l2_output = [l2[idx].lower() for idx in l2_idx]
 
-      l3_output = strat_pred(models[2], seq, context)
+      l3_output = strat_pred(models[2], seq, context,config)
       l3_output = np.array(l3_output > 0.5, dtype=float)
       l3_idx = np.where(l3_output == 1)[0]
-      l3_output = [l3[idx] for idx in l3_idx]
+      l3_output = [l3[idx].lower() for idx in l3_idx]
 
-      l4_output = strat_pred(models[3], seq, context)
+      l4_output = strat_pred(models[3], seq, context,config)
       l4_output = np.array(l4_output > 0.5, dtype=float)
       l4_idx = np.where(l4_output == 1)[0]
-      l4_output = [l4[idx] for idx in l4_idx]
+      l4_output = [l4[idx].lower() for idx in l4_idx]
 
       # Concatenate teh strategies
       seq_strats = l2_output + l3_output + l4_output
@@ -350,36 +308,47 @@ def predict_strategies(articles, models, context):
   return pred
 
 
-def combine_claim_article(claims_articles):
+def combine_claim_article(claims_articles,config):
   combined = []
-
+  print(config.max_length)
   # For all articles and the strategies they are annotated with
   for claim, article in tqdm(claims_articles):
 
     # The maximum token length the article can be is 512 - (strategy token length)
-    strat_token_len = token_length(claim)
-    max_article_len = 512 - strat_token_len
+    strat_token_len = token_length(claim,config)
+    max_article_len = config.max_length - strat_token_len
 
     combined_str = ""
+    summary = article
     for i in range(10, 0, -1):
       try:
-        summary = summarize(article, ratio=i / 10)
-        token_len = token_length(summary)
+        token_len = token_length(summary,config)
         if token_len < max_article_len:
-          combined_str = claim + ' </s> ' + summary
           break
+        summary = summarize(article, ratio=i / 10)
       except:
-        combined_str =  claim + ' </s> ' + article
+        import traceback
+        print(traceback.format_exc())
         break
-    try:
-      combined_str
-    except:
-      summary = summarize(article, ratio=0.1)
-      combined_str = claim + ' </s> ' + article
+    combined_str =  claim + ' </s></s> ' + summary
     combined.append(combined_str)
 
   return combined
 
+def summarize_article(articles,config):
+  combined = []
+  print(config.max_length)
+  # For all articles and the strategies they are annotated with
+  for article in tqdm(articles):
+
+    # The maximum token length the article can be is 512 - (strategy token length)
+    summary = article
+    token_len = token_length(summary,config)
+    if token_len > config.max_length:
+        summary = summarize(article, word_count=config.max_length)
+    combined.append(summary)
+
+  return combined
 
 # Build a dataset from the annotated articles
 def build_complete_dataset(file, models, context,config):
@@ -393,24 +362,29 @@ def build_complete_dataset(file, models, context,config):
   data = data[data["label"] != "mixed"]
   data = data[data["label"] != "none"]
 
-  # Remove duplicates and convert the strategies into a token separated list
-  data["combined"] = combine_claim_article(zip(data["claim"],data["article"]))
 
-  data["target_strategy"] = remove_duplicates(data["target_strategy"])
-  data["target_strategy"] = list_to_str(data["target_strategy"], sep=' </s> ')
+  # Remove duplicates and convert the strategies into a token separated list
+  data["claim_article"] = combine_claim_article(zip(data["claim"],data["article"]),config)
+  
+
+  # data["gt_strategy"] = remove_duplicates(data["gt_strategy"])
+  data["gt_strategy"] = list_to_str(data["gt_strategy"], sep=' </s> ')
 
   # Predict the article strategies at the given context
-  data["pred_strategy"] = predict_strategies(data["article"], models, context)
-  data["pred_strategy"] = remove_duplicates(data["pred_strategy"])
+  data["pred_strategy"] = predict_strategies(data["article"], models, context, config)
+  # data["pred_strategy"] = remove_duplicates(data["pred_strategy"])
   data["pred_strategy"] = list_to_str(data["pred_strategy"], sep=' </s> ')
 
 
   # Create the column with the article text and target strategies
-  data["target_combined"] = correct_length_inputs(data["claim"], data["article"], data["target_strategy"])
+  data["claim_gt"] = correct_length_inputs_claim(data["claim"], data["gt_strategy"], config)
+  data["claim_article_gt"] = correct_length_inputs(data["claim"], data["article"], data["gt_strategy"], config)
 
   # Create the column with the article text and predicted strategies
-  data["pred_strategy"] = correct_length_inputs(data["claim"], data["article"], data["pred_strategy"])
+  data["claim_pred"] = correct_length_inputs_claim(data["claim"], data["pred_strategy"], config)
+  data["claim_article_pred"] = correct_length_inputs(data["claim"], data["article"], data["pred_strategy"], config)
 
+  data["article"] = summarize_article(data["article"],config)
   return data
 
 
@@ -418,7 +392,6 @@ def build_complete_dataset(file, models, context,config):
 class ArticleDataset(torch.utils.data.Dataset):
 
   def __init__(self, data, column):
-    self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
     labels = \
       {
         True:0,
@@ -427,12 +400,7 @@ class ArticleDataset(torch.utils.data.Dataset):
         "false": 1
       }
     self.labels = [labels[label] for label in data['label']]
-    self.texts = [self.tokenizer(str(text),
-                                 padding='max_length',
-                                 max_length=512,
-                                 truncation=True,
-                                 return_tensors="pt")
-                  for text in data[column]]
+    self.texts = tuple(data[column])
 
   def classes(self):
     return self.labels

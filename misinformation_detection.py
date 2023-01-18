@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import torch
 import argparse
-
+import random
 from segment_data import construct_segment_dict
 from segment_data import convert_to_dataframe
 from strategy_model import strategy_evaluate
@@ -15,32 +15,33 @@ from configs import get_config
 from utils import set_seed
 class Config:
     dropout = 0.5
+    max_length = 512
     num_labels = 2
-    freeze_layers = None
-    classifier_second_layer = 1024
+    freeze_layers = 181
+    longformer = False
+    classifier_second_layer = None
     batch_size = 10
-    epochs = 40
+    epochs = 50
     learning_rate = 5e-5
-    seed = 9877
+    seed = random.randint(0,99999999)
+    # seed = 9877
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--test_article', type=int,default=0)
 parser.add_argument('--mode', type=str,default="train")
 parser.add_argument('--context', type=str,choices="none,low,high".split(","),default="none")
-parser.add_argument('--source', type=str,choices=["article", "ground_truth" ,"pred","claim","combined"])
+parser.add_argument('--source', type=str,choices=["claim","article","gt_strategy", "claim_article","pred_strategy","claim_gt","claim_article_gt" ,"claim_pred","claim_article_pred"])
+parser.add_argument('--norm', type=int,choices=[0,1])
 args = parser.parse_args()
 context = args.context
 
 # Declare the learning rate and batch size for detection training
 article_config = Config()
-if context == "high" and args.source == "pred":
-    article_config.classifier_second_layer = 2048
 set_seed(article_config.seed)
 
 
 layer_models = []
 for layer in ["1", "2", "3", "4"]:
-    path = f"models/{layer}_{context}.pt"
+    path = f"models/{layer}_{context}_best.pt"
     config = get_config(layer,context)
 
     # Create the test annotation dictionary
@@ -69,14 +70,14 @@ if not os.path.exists(f"data/train_article_data_{context}.csv"):
     train_article_data = build_complete_dataset("data/anno_train",
                                                 layer_models,
                                                 context,
-                                                config)
+                                                article_config)
     train_article_data.to_csv(f"data/train_article_data_{context}.csv")
 if not os.path.exists(f"data/test_article_data_{context}.csv"):
     # Create the test article dataset (This takes a very long time)
     test_article_data = build_complete_dataset("data/anno_test",
                                             layer_models,
                                             context,
-                                            config)
+                                            article_config)
     test_article_data.to_csv(f"data/test_article_data_{context}.csv")
 
 # # Read the train and test article datasets into dataframes
@@ -91,20 +92,16 @@ test_data = test_data[test_data["label"] != "none"]
 # Calculate the weights based on the training set
 weights = calculate_article_weights(train_data)
 print(weights)
+weights = calculate_article_weights(test_data)
+print(weights)
 
 # Define the layer to train and test on.
 # "article" for base article text
 # "target_combined" for article and ground truth labels
 # "pred_combined" for article and predicted labels
-source_to_column = {
-    "ground_truth":"target_combined",
-    "pred":"pred_strategy",
-    "article":"article",
-    "claim":"claim",
-    "combined":"combined"
-}
-column = source_to_column[args.source]
-path = f"models/{column}_{context}.pt"
+
+column = args.source
+path = f"models/{column}_{context}_{article_config.seed}.pt"
 print(path)
 # Define the fake news detection model
 
@@ -118,3 +115,5 @@ best_model_weights = torch.load(path)["best_model_weights"]
 strategy_model.load_state_dict(best_model_weights)
 print(column)
 article_evaluate(model=strategy_model, test_data=test_data, batch_size=article_config.batch_size, column=column, verbose=True)
+
+
